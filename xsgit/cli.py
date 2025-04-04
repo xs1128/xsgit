@@ -21,6 +21,8 @@ def parse_args():
         2. hash_object
         3. cat-file
         4. write-tree
+        5. read-tree
+        6. commit
     """
     parser = argparse.ArgumentParser()
 
@@ -40,6 +42,14 @@ def parse_args():
 
     write_tree_parser = commands.add_parser("write-tree")
     write_tree_parser.set_defaults(func=write_tree)
+
+    read_tree_parser = commands.add_parser("read-tree")
+    read_tree_parser.set_defaults(func=read_tree)
+    read_tree_parser.add_argument("tree")
+
+    commit_parser = commands.add_parser("commit")
+    commit_parser.set_defaults(func=commit)
+    commit_parser.add_argument("-m", "--message", required=True)
 
     return parser.parse_args()
 
@@ -72,4 +82,23 @@ def cat_file(args):
 
 
 def write_tree(args):
+    """
+    Process files and directories into objects
+    Dirctories will be type of "tree"
+    Files will be in the type of "blob"
+    """
     print(base.write_tree())
+
+
+def read_tree(args):
+    """
+    Take in the object type and extract the encrypted data inside
+    """
+    base.read_tree(args.tree)
+
+
+def commit(args):
+    """
+    Create a commit message
+    """
+    print(base.commit(args.message))
