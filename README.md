@@ -1,6 +1,6 @@
 # xsgit
 
-**xsgit** is a lightweight, educational implementation of Git written in Python, inspired by [ugit](https://github.com/mach-kernel/ugit). The purpose of this project is to build a deeper understanding of how Git works under the hood by reimplementing its core features step by step.
+**xsgit** is a lightweight, educational implementation of Git written in Python, inspired by [ugit](https://www.leshenko.net/p/ugit/#). The purpose of this project is to build a deeper understanding of how Git works under the hood by reimplementing its core features step by step.
 
 > ⚠️ xsgit is not a full Git replacement and is currently under development.
 
