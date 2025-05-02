@@ -24,6 +24,7 @@ def parse_args():
         4. write-tree
         5. read-tree
         6. commit
+        7. log
     """
     parser = argparse.ArgumentParser()
 
@@ -111,7 +112,7 @@ def commit(args):
 
 def log(args):
     """
-    Return the log
+    Return the log of commits
     """
 
     oid = args.oid or data.get_HEAD()

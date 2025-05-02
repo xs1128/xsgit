@@ -4,11 +4,11 @@
 
 > ⚠️ xsgit is not a full Git replacement and is currently under development.
 
-## 🚀 Project Goal
+## 🧑🏻‍💻 Project Goal
 
 To learn how Git works internally — by coding it. `xsgit` focuses on simplicity and clarity, avoiding the complexity and performance optimizations of production Git. Every feature is a reflection of key Git concepts, implemented in Python and explained through readable code.
 
-## ✅ Implemented Features
+## 🤩 Implemented Features
 
 ### Repository Initialization
 - `xsgit init`: Initializes a new xsgit repository by setting up the `.xsgit/` directory structure.
@@ -23,14 +23,14 @@ To learn how Git works internally — by coding it. `xsgit` focuses on simplicit
 
 ### Commit System
 - `xsgit commit`: Records a commit object with a reference to the current tree and optional parent commits.
-- Commit parser: Parses commit objects for inspection and reference.
+- `xsgit log`: Displays the commit history starting from a given commit OID (or the current HEAD if none is specified), showing each commit's hash and message.
 
-## 📦 Installation (Dev Mode)
+## 📦 Installation 
 
 To install `xsgit` in development mode:
 
 ```bash
 git clone https://github.com/yourusername/xsgit.git
-cd xsgit
+cd xsgit    # Change directory to xsgit before running the next line
 python3 setup.py develop --user
 
