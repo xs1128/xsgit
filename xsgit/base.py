@@ -1,5 +1,8 @@
 import os
+import itertools
+import operator
 
+from collections import namedtuple
 from . import data
 
 
@@ -109,7 +112,7 @@ def commit(message):
 
     HEAD = data.get_HEAD()
     if HEAD:
-        commit_msg += f"parent {HEAD}"
+        commit_msg += f"parent {HEAD}\n"
 
     commit_msg += "\n"
     commit_msg += f"{message}\n"
@@ -122,6 +125,33 @@ def commit(message):
     data.set_HEAD(oid)
 
     return oid
+
+
+Commit = namedtuple("Commit", ["tree", "parent", "message"])
+
+
+def get_commit(oid):
+    """
+    Iterate through the commits and return a namedtuple
+    """
+    # TODO: Analyze the time complexity, if bad, use trie to optimize the performance
+
+    parent = None
+
+    cmt = data.get_object(oid, "commit").decode()
+    lines = iter(cmt.splitlines())
+
+    for line in itertools.takewhile(operator.truth, lines):
+        key, value = line.split(" ", 1)
+        if key == "tree":
+            tree = value
+        elif key == "parent":
+            parent = value
+        else:
+            assert False, f"Unknown field {key}"
+
+    message = "\n".join(lines)
+    return Commit(tree=tree, parent=parent, message=message)
 
 
 def is_ignored(path):

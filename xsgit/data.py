@@ -43,7 +43,7 @@ def hash_object(data, type_="blob"):
     # Write in binary mode
     # TO-DO: Compress files into seperate directories for big-scale code
     with open(f"{GIT_DIR}/objects/{oid}", "wb") as out:
-        out.write(data)
+        out.write(obj)
     return oid
 
 
@@ -59,5 +59,5 @@ def get_object(oid, expected="blob"):
     type_ = type_.decode()
 
     if expected is not None:
-        assert type_ == expected, f"Expected {expected}, got{type}"
+        assert type_ == expected, f"Expected {expected}, got{type_}"
     return content
