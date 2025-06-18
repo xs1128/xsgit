@@ -13,21 +13,39 @@ def init():
     os.makedirs(f"{GIT_DIR}/objects")
 
 
-def set_HEAD(oid):
+def update_ref(ref, oid):
     """
     Set the latest commit blob as the HEAD to link history commits
     """
-    with open(f"{GIT_DIR}/HEAD", "w") as f:
+    ref_path = f"{GIT_DIR}/{ref}"
+    os.makedirs(os.path.dirname(ref_path), exist_ok=True)
+
+    with open(ref_path, "w") as f:
         f.write(oid)
 
 
-def get_HEAD():
+def get_ref(ref):
     """
     Return data in HEAD file if available
     """
-    if os.path.isfile(f"{GIT_DIR}/HEAD"):
-        with open(f"{GIT_DIR}/HEAD", "r") as f:
+    ref_path = f"{GIT_DIR}/{ref}"
+
+    if os.path.isfile(ref_path):
+        with open(ref_path, "r") as f:
             return f.read().strip()
+
+
+def iter_refs():
+    """
+    Go through every ref and display according to path
+    """
+    refs = ["HEAD"]
+    for root, _, fnames in os.walk(f"{GIT_DIR}/refs/"):
+        root = os.path.relpath(root, GIT_DIR)
+        refs.extend(f"{root}/{name}" for name in fnames)
+
+    for refname in refs:
+        yield refname, get_ref(refname)
 
 
 def hash_object(data, type_="blob"):

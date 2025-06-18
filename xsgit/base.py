@@ -1,8 +1,9 @@
 import os
 import itertools
 import operator
+import string
 
-from collections import namedtuple
+from collections import deque, namedtuple
 from . import data
 
 
@@ -61,9 +62,9 @@ def get_tree(oid, base_path=""):
         assert name not in ("..", ".")
         path = base_path + name
 
-        if type == "blob":
+        if type_ == "blob":
             result[path] = oid_
-        elif type == "tree":
+        elif type_ == "tree":
             result.update(get_tree(oid_, f"{path}/"))
         else:
             assert False, f"Unknown tree entry {type_}"
@@ -110,7 +111,7 @@ def commit(message):
     """
     commit_msg = f"tree {write_tree()}\n"
 
-    HEAD = data.get_HEAD()
+    HEAD = data.get_ref("HEAD")
     if HEAD:
         commit_msg += f"parent {HEAD}\n"
 
@@ -122,9 +123,25 @@ def commit(message):
     oid = data.hash_object(commit_msg.encode(), "commit")
 
     # Set the latest commit as HEAD
-    data.set_HEAD(oid)
+    data.update_ref("HEAD", oid)
 
     return oid
+
+
+def checkout(oid):
+    """
+    Given an oid and get read the tree and set our HEAD to the tree
+    """
+    commit = get_commit(oid)
+    read_tree(commit.tree)
+    data.update_ref("HEAD", oid)
+
+
+def create_tag(name, oid):
+    """
+    Create a tag given the name
+    """
+    data.update_ref(f"refs/tags/{name}", oid)
 
 
 Commit = namedtuple("Commit", ["tree", "parent", "message"])
@@ -141,6 +158,7 @@ def get_commit(oid):
     cmt = data.get_object(oid, "commit").decode()
     lines = iter(cmt.splitlines())
 
+    tree = ""
     for line in itertools.takewhile(operator.truth, lines):
         key, value = line.split(" ", 1)
         if key == "tree":
@@ -152,6 +170,53 @@ def get_commit(oid):
 
     message = "\n".join(lines)
     return Commit(tree=tree, parent=parent, message=message)
+
+
+def iter_commits_and_parents(oids):
+    """
+    Loop through every objet IDs
+    Run a BFS to go through all objects
+    """
+    oids = deque(oids)
+    visited = set()
+
+    while oids:
+        oid = oids.popleft()
+        if not oid or oid in visited:
+            continue
+        visited.add(oid)
+        yield oid
+
+        cmt = get_commit(oid)
+        # Append the next parent
+        oids.appendleft(cmt.parent)
+
+
+def get_oid(name):
+    """
+    Return the oid of the tag name or the name is the oid
+    Quality of life upgrade for path prefix
+    """
+    if name == "@":
+        name = "HEAD"
+
+    potential_refs = [
+        f"{name}",
+        f"refs/{name}",
+        f"refs/tags/{name}",
+        f"refs/heads/{name}",
+    ]
+
+    for ref in potential_refs:
+        if data.get_ref(ref):
+            return data.get_ref(ref)
+
+    # Check for name to be a hashed value
+    is_hex = all(c in string.hexdigits for c in name)
+    if len(name) == 40 and is_hex:
+        return name
+
+    assert False, f"Unknown name {name}"
 
 
 def is_ignored(path):

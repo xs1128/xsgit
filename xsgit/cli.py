@@ -2,6 +2,7 @@ import argparse
 import os
 import textwrap
 import sys
+import subprocess
 
 from . import base, data
 
@@ -31,6 +32,8 @@ def parse_args():
     commands = parser.add_subparsers(dest="command")
     commands.required = True
 
+    oid = base.get_oid
+
     init_parser = commands.add_parser("init")
     init_parser.set_defaults(func=init)
 
@@ -40,14 +43,14 @@ def parse_args():
 
     cat_file_parser = commands.add_parser("cat-file")
     cat_file_parser.set_defaults(func=cat_file)
-    cat_file_parser.add_argument("object")
+    cat_file_parser.add_argument("object", type=oid)
 
     write_tree_parser = commands.add_parser("write-tree")
     write_tree_parser.set_defaults(func=write_tree)
 
     read_tree_parser = commands.add_parser("read-tree")
     read_tree_parser.set_defaults(func=read_tree)
-    read_tree_parser.add_argument("tree")
+    read_tree_parser.add_argument("tree", type=oid)
 
     commit_parser = commands.add_parser("commit")
     commit_parser.set_defaults(func=commit)
@@ -55,7 +58,20 @@ def parse_args():
 
     log_parser = commands.add_parser("log")
     log_parser.set_defaults(func=log)
-    log_parser.add_argument("oid", nargs="?")
+    log_parser.add_argument("oid", default="@", type=oid, nargs="?")
+
+    checkout_parser = commands.add_parser("checkout")
+    checkout_parser.set_defaults(func=checkout)
+    checkout_parser.add_argument("oid", type=oid)
+
+    tag_parser = commands.add_parser("tag")
+    tag_parser.set_defaults(func=tag)
+    tag_parser.add_argument("name")
+    tag_parser.add_argument("oid", default="@", type=oid, nargs="?")
+
+    # Graphical visualization thingy
+    k_parser = commands.add_parser("k")
+    k_parser.set_defaults(func=k)
 
     return parser.parse_args()
 
@@ -115,12 +131,56 @@ def log(args):
     Return the log of commits
     """
 
-    oid = args.oid or data.get_HEAD()
-    while oid:
-        commit = base.get_commit(oid)
+    for oid in base.iter_commits_and_parents({args.oid}):
+        cmt = base.get_commit(oid)
 
         print(f"commit {oid}\n")
-        print(textwrap.indent(commit.message, "    "))
+        print(textwrap.indent(cmt.message, "    "))
         print("")
 
-        oid = commit.parent
+
+def checkout(args):
+    """
+    Checkout to different branch
+    """
+    base.checkout(args.oid)
+
+
+def tag(args):
+    """
+    Get object id from argument or current HEAD
+    Create a tag of it
+    """
+    base.create_tag(args.name, args.oid)
+
+
+def k(args):
+    """
+    Display git blobs and trees in a ordered manner
+    """
+    dot = "digraph commits {\n"
+    oids = set()
+    for refname, ref in data.iter_refs():
+        dot += f'"{refname}" [shape=note]\n'
+        dot += f'"{refname}" -> "{ref}"\n'
+        oids.add(ref)
+
+    for oid in base.iter_commits_and_parents(oids):
+        cmt = base.get_commit(oid)
+        dot += f'"{oid}" [shape=box style=filled label="{oid[:10]}"]\n'
+
+        if cmt.parent:
+            dot += f'"{oid}" -> "{cmt.parent}"\n'
+
+    dot += "}"
+
+    # Visualize the reference on your brower
+    # On MacOS, open x.svg -a Browser.app
+    with subprocess.Popen(
+        ['dot', '-Tsvg'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE
+    ) as proc:
+        svg_data, _ = proc.communicate(dot.encode())
+    with open('output.svg', 'wb') as f:
+        f.write(svg_data)
