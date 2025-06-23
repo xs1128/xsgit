@@ -1,8 +1,24 @@
 import hashlib
 import os
-import sys
+import shutil
+import json
 
-GIT_DIR = ".xsgit"
+from collections import namedtuple
+from contextlib import contextmanager
+
+GIT_DIR = None
+
+
+@contextmanager
+def change_git_dir(new_dir):
+    """
+    Change git directory
+    """
+    global GIT_DIR
+    old_dir = GIT_DIR
+    GIT_DIR = f"{new_dir}/.xsgit"
+    yield
+    GIT_DIR = old_dir
 
 
 def init():
@@ -13,39 +29,96 @@ def init():
     os.makedirs(f"{GIT_DIR}/objects")
 
 
-def update_ref(ref, oid):
+# Abstraction for value for easier manipulation
+RefValue = namedtuple("RefValue", ["symbolic", "value"])
+
+
+def update_ref(ref, value, deref=True):
     """
     Set the latest commit blob as the HEAD to link history commits
     """
+    ref = _get_ref_internal(ref, deref)[0]
+
+    # Premature error check
+    assert value.value
+    if value.symbolic:
+        value = f"ref: {value.value}"
+    else:
+        value = value.value
+
     ref_path = f"{GIT_DIR}/{ref}"
     os.makedirs(os.path.dirname(ref_path), exist_ok=True)
 
     with open(ref_path, "w") as f:
-        f.write(oid)
+        f.write(value)
 
 
-def get_ref(ref):
+def get_ref(ref, deref=True):
+    """
+    A recursive function that find the ref which has the oid and value
+    """
+    return _get_ref_internal(ref, deref)[1]
+
+
+def delete_ref(ref, deref=True):
+    """
+    Delete existing reference
+    """
+    ref = _get_ref_internal(ref, deref)[0]
+    os.remove(f"{GIT_DIR}/{ref}")
+
+
+def _get_ref_internal(ref, deref):
     """
     Return data in HEAD file if available
     """
     ref_path = f"{GIT_DIR}/{ref}"
+    value = None
 
     if os.path.isfile(ref_path):
-        with open(ref_path, "r") as f:
-            return f.read().strip()
+        with open(ref_path) as f:
+            value = f.read().strip()
+
+    symbolic = bool(value) and value.startswith("ref:")
+    if symbolic:
+        value = value.split(":", 1)[1].strip()
+        if deref:
+            return _get_ref_internal(value, deref=True)
+
+    return ref, RefValue(symbolic=symbolic, value=value)
 
 
-def iter_refs():
+def iter_refs(prefix="", deref=True):
     """
     Go through every ref and display according to path
     """
-    refs = ["HEAD"]
+    refs = ["HEAD", "MERGE_HEAD"]
     for root, _, fnames in os.walk(f"{GIT_DIR}/refs/"):
         root = os.path.relpath(root, GIT_DIR)
         refs.extend(f"{root}/{name}" for name in fnames)
 
     for refname in refs:
-        yield refname, get_ref(refname)
+        if not refname.startswith(prefix):
+            continue
+        ref = get_ref(refname, deref=deref)
+        if ref.value:
+            yield refname, ref
+
+
+@contextmanager
+def get_index():
+    """
+    Get indices and return in a dict form
+    """
+    index = {}
+    if os.path.isfile(f"{GIT_DIR}/index"):
+        with open(f"{GIT_DIR}/index") as f:
+            index = json.load(f)
+
+    yield index
+
+    with open(f"{GIT_DIR}/index", "w") as f:
+        json.dump(index, f)
 
 
 def hash_object(data, type_="blob"):
@@ -79,3 +152,31 @@ def get_object(oid, expected="blob"):
     if expected is not None:
         assert type_ == expected, f"Expected {expected}, got{type_}"
     return content
+
+
+def object_exists(oid):
+    """
+    Check object exists in local
+    """
+    return os.path.isfile(f"{GIT_DIR}/objects/{oid}")
+
+
+def fetch_object_if_missing(oid, remote_git_dir):
+    """
+    Check if exists and then append
+    """
+    if object_exists(oid):
+        return
+
+    remote_git_dir += "/.xsgit"
+    shutil.copy(f"{remote_git_dir}/objects/{oid}",
+                f"{GIT_DIR}/objects/{oid}")
+
+
+def push_object(oid, remote_git_dir):
+    """
+    Push object to remote
+    """
+    remote_git_dir += "/.xsgit"
+    shutil.copy(f"{GIT_DIR}/objects/{oid}",
+                f"{remote_git_dir}/objects/{oid}")

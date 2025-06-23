@@ -4,36 +4,51 @@ import operator
 import string
 
 from collections import deque, namedtuple
-from . import data
+from . import data, diff
 
 
-def write_tree(directory="."):
+def init():
     """
-    Recursively generate encoded tree object
+    Initialization of the base of our system
     """
-    # Use os.scandir as a recursive generator
-    entries = []
-    with os.scandir(directory) as itr:
-        for entry in itr:
-            full = f"{directory}/{entry.name}"
-            if is_ignored(full):
-                continue
+    data.init()
+    data.update_ref("HEAD", data.RefValue(
+        symbolic=True, value="refs/heads/main"))
 
-            # Determine type of entry
-            if entry.is_file(follow_symlinks=False):
-                type_ = "blob"
-                with open(full, "rb") as f:
-                    oid = data.hash_object(f.read())
-            elif entry.is_dir(follow_symlinks=False):
+
+def write_tree():
+    """
+    Write into tree and set up the recursive structure
+    """
+    index_as_tree = {}
+    with data.get_index() as index:
+        for path, oid in index.items():
+            path = path.split("/")
+            dirpath, filename = path[:-1], path[-1]
+
+            curr = index_as_tree
+
+            for dirname in dirpath:
+                curr = curr.setdefault(dirname, {})
+            curr[filename] = oid
+
+    def write_tree_recursive(tree_dict):
+        entries = []
+        for name, value in tree_dict.items():
+            if isinstance(value, dict):
                 type_ = "tree"
-                oid = write_tree(full)
+                oid = write_tree_recursive(value)
+            else:
+                type_ = "blob"
+                oid = value
 
-            entries.append((entry.name, oid, type_))
+            entries.append((name, oid, type_))
 
-    tree = ""
-    for name, oid, type_ in sorted(entries):
-        tree = "".join(f"{type_} {oid} {name}\n")
-    return data.hash_object(tree.encode(), "tree")
+        tree = "".join(f"{type_} {oid} {name}\n"
+                       for name, oid, type_ in sorted(entries))
+        return data.hash_object(tree.encode(), "tree")
+
+    return write_tree_recursive(index_as_tree)
 
 
 def _iter_tree_entries(oid):
@@ -71,6 +86,30 @@ def get_tree(oid, base_path=""):
     return result
 
 
+def get_working_tree():
+    """
+    Go through curr directory and get info form files
+    """
+    result = {}
+    for root, _, fnames, in os.walk("."):
+        for fname in fnames:
+            path = os.path.relpath(f"{root}/{fname}")
+            if is_ignored(path) or not os.path.isfile(path):
+                continue
+            with open(path, "rb") as f:
+                result[path] = data.hash_object(f.read())
+
+    return result
+
+
+def get_index_tree():
+    """
+    Return index
+    """
+    with data.get_index() as index:
+        return index
+
+
 def _empty_curr_directory():
     """
     Clear current directory iteratively before reading a tree objct
@@ -94,15 +133,43 @@ def _empty_curr_directory():
                 pass
 
 
-def read_tree(tree_oid):
+def read_tree(tree_oid, update_working=False):
     """
-    Write binary files in path for the tree extracted
+    Include indcices in tree reading
+    """
+    with data.get_index() as index:
+        index.clear()
+        index.update(get_tree(tree_oid))
+
+        if update_working:
+            _checkout_index(index)
+
+
+def read_tree_merged(t_base, t_HEAD, t_other, update_working=False):
+    """
+    Merge trees by writing into files
+    """
+    with data.get_index() as index:
+        index.clear()
+        index.update(diff.merge_trees(
+            get_tree(t_base),
+            get_tree(t_HEAD),
+            get_tree(t_other)
+        ))
+
+    if update_working:
+        _checkout_index(index)
+
+
+def _checkout_index(index):
+    """
+    Checkout to a particular index
     """
     _empty_curr_directory()
-    for path, oid in get_tree(tree_oid, base_path="./").items():
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    for path, oid in index.items():
+        os.makedirs(os.path.dirname(f"./{path}"), exist_ok=True)
         with open(path, "wb") as f:
-            f.write(data.get_object(oid))
+            f.write(data.get_object(oid, "blob"))
 
 
 def commit(message):
@@ -111,9 +178,14 @@ def commit(message):
     """
     commit_msg = f"tree {write_tree()}\n"
 
-    HEAD = data.get_ref("HEAD")
+    HEAD = data.get_ref("HEAD").value
     if HEAD:
         commit_msg += f"parent {HEAD}\n"
+
+    MERGE_HEAD = data.get_ref("MERGE_HEAD").value
+    if MERGE_HEAD:
+        commit_msg += f"parent {MERGE_HEAD}\n"
+        data.delete_ref("MERGE_HEAD", deref=False)
 
     commit_msg += "\n"
     commit_msg += f"{message}\n"
@@ -123,28 +195,124 @@ def commit(message):
     oid = data.hash_object(commit_msg.encode(), "commit")
 
     # Set the latest commit as HEAD
-    data.update_ref("HEAD", oid)
+    data.update_ref("HEAD", data.RefValue(symbolic=False, value=oid))
 
     return oid
 
 
-def checkout(oid):
+def checkout(name):
     """
     Given an oid and get read the tree and set our HEAD to the tree
     """
-    commit = get_commit(oid)
-    read_tree(commit.tree)
-    data.update_ref("HEAD", oid)
+    oid = get_oid(name)
+    cmt = get_commit(oid)
+    read_tree(cmt.tree, update_working=True)
+
+    if is_branch(name):
+        HEAD = data.RefValue(symbolic=True, value=f"refs/heads/{name}")
+    else:
+        HEAD = data.RefValue(symbolic=False, value=oid)
+
+    data.update_ref("HEAD", HEAD, deref=False)
+
+
+def reset(oid):
+    """
+    Reset HEAD to certain oid
+    """
+    data.update_ref("HEAD", data.RefValue(symbolic=False, value=oid))
+
+
+def merge(other):
+    """
+    Merge branches and resolve conflicts
+    """
+    HEAD = data.get_ref("HEAD").value
+    assert HEAD
+    merge_base = get_merge_base(other, HEAD)
+    c_other = get_commit(other)
+
+    # Handle fast-farward mege while can
+    if merge_base == HEAD:
+        read_tree(c_other.tree, update_working=True)
+        data.update_ref("HEAD", data.RefValue(symbolic=False, value=other))
+        print("Fast-forward merge, no need to commit")
+        return
+
+    data.update_ref("MERGE_HEAD", data.RefValue(symbolic=False, value=other))
+
+    c_base = get_commit(merge_base)
+    c_HEAD = get_commit(HEAD)
+    read_tree_merged(c_base.tree, c_HEAD.tree,
+                     c_other.tree, update_working=True)
+    print("Merged in working tree\nPlease commit")
+
+
+def get_merge_base(oid1, oid2):
+    """
+    Return the oid of the merge's base by comparing one by one
+    """
+    parents1 = set(iter_commits_and_parents({oid1}))
+
+    for oid in iter_commits_and_parents({oid2}):
+        if oid in parents1:
+            return oid
+
+    return None
+
+
+def is_ancestor_of(cmt, potential_ancestor):
+    """
+    Return boolean value of check
+    """
+    return potential_ancestor in iter_commits_and_parents({cmt})
 
 
 def create_tag(name, oid):
     """
     Create a tag given the name
     """
-    data.update_ref(f"refs/tags/{name}", oid)
+    data.update_ref(f"refs/tags/{name}",
+                    data.RefValue(symbolic=False, value=oid))
 
 
-Commit = namedtuple("Commit", ["tree", "parent", "message"])
+def create_branch(name, oid):
+    """
+    Create a branch of the given name
+    """
+    data.update_ref(f"refs/heads/{name}",
+                    data.RefValue(symbolic=False, value=oid))
+
+
+def iter_branch_name():
+    """
+    Generator for branches
+    """
+    for refname, _ in data.iter_refs("refs/heads/"):
+        yield os.path.relpath(refname, "refs/heads/")
+
+
+def is_branch(branch):
+    """
+    Return branch or not
+    """
+    return data.get_ref(f"refs/heads/{branch}").value is not None
+
+
+def get_branch_name():
+    """
+    Helper function to get branch name of a oid
+    """
+    HEAD = data.get_ref("HEAD", deref=False)
+    if not HEAD.symbolic:
+        return None
+
+    HEAD = HEAD.value
+    assert HEAD.startswith("refs/heads/")
+    return os.path.relpath(HEAD, "refs/heads")
+
+
+Commit = namedtuple("Commit", ["tree", "parents", "message"])
 
 
 def get_commit(oid):
@@ -153,7 +321,7 @@ def get_commit(oid):
     """
     # TODO: Analyze the time complexity, if bad, use trie to optimize the performance
 
-    parent = None
+    parents = []
 
     cmt = data.get_object(oid, "commit").decode()
     lines = iter(cmt.splitlines())
@@ -164,12 +332,12 @@ def get_commit(oid):
         if key == "tree":
             tree = value
         elif key == "parent":
-            parent = value
+            parents.append(value)
         else:
             assert False, f"Unknown field {key}"
 
     message = "\n".join(lines)
-    return Commit(tree=tree, parent=parent, message=message)
+    return Commit(tree=tree, parents=parents, message=message)
 
 
 def iter_commits_and_parents(oids):
@@ -188,8 +356,36 @@ def iter_commits_and_parents(oids):
         yield oid
 
         cmt = get_commit(oid)
-        # Append the next parent
-        oids.appendleft(cmt.parent)
+        oids.extendleft(cmt.parents[:1])
+        oids.extend(cmt.parents[1:])
+
+
+def iter_objects_in_commits(oids):
+    """
+
+    """
+    visited = set()
+
+    def iter_objects_in_tree(oid):
+        """
+        Subfunction to get all oid
+        """
+        visited.add(oid)
+        yield oid
+
+        for type_, oid_, _ in _iter_tree_entries(oid):
+            if oid_ not in visited:
+                if type_ == "tree":
+                    yield from iter_objects_in_tree(oid_)
+                else:
+                    visited.add(oid_)
+                    yield oid_
+
+    for oid in iter_commits_and_parents(oids):
+        yield oid
+        cmt = get_commit(oid)
+        if cmt.tree not in visited:
+            yield from iter_objects_in_tree(cmt.tree)
 
 
 def get_oid(name):
@@ -208,8 +404,8 @@ def get_oid(name):
     ]
 
     for ref in potential_refs:
-        if data.get_ref(ref):
-            return data.get_ref(ref)
+        if data.get_ref(ref, deref=False).value:
+            return data.get_ref(ref).value
 
     # Check for name to be a hashed value
     is_hex = all(c in string.hexdigits for c in name)
@@ -217,6 +413,32 @@ def get_oid(name):
         return name
 
     assert False, f"Unknown name {name}"
+
+
+def add(filenames):
+    """
+    Put file changes
+    """
+    def add_file(filename):
+        filename = os.path.relpath(filename)
+        with open(filename, "rb") as f:
+            oid = data.hash_object(f.read())
+        index[filename] = oid
+
+    def add_directory(dirname):
+        for root, _, filenames in os.walk(dirname):
+            for filename in filenames:
+                path = os.path.relpath(f"{root}/{filename}")
+                if is_ignored(path) or not os.path.isfile(path):
+                    continue
+                add_file(path)
+
+    with data.get_index() as index:
+        for name in filenames:
+            if os.path.isfile(name):
+                add_file(name)
+            elif os.path.isdir(name):
+                add_directory(name)
 
 
 def is_ignored(path):

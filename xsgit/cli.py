@@ -4,15 +4,16 @@ import textwrap
 import sys
 import subprocess
 
-from . import base, data
+from . import base, data, diff, remote
 
 
 def main():
     """
     Call and run the functions for parsing arguments
     """
-    args = parse_args()
-    args.func(args)
+    with data.change_git_dir("."):
+        args = parse_args()
+        args.func(args)
 
 
 def parse_args():
@@ -26,6 +27,18 @@ def parse_args():
         5. read-tree
         6. commit
         7. log
+        8. checkout
+        9. tag
+        10. k
+        11. branch
+        12. diff
+        13. merge
+        14. fetch
+        15. push
+        16. add
+        17. show
+        18. status
+        19. merge-base
     """
     parser = argparse.ArgumentParser()
 
@@ -60,9 +73,19 @@ def parse_args():
     log_parser.set_defaults(func=log)
     log_parser.add_argument("oid", default="@", type=oid, nargs="?")
 
+    show_parser = commands.add_parser("show")
+    show_parser.set_defaults(func=show)
+    show_parser.add_argument("oid", default="@", type=oid, nargs="?")
+
+    diff_parser = commands.add_parser("diff")
+    # use underscore to differentiate from python built in diff
+    diff_parser.set_defaults(func=_diff)
+    diff_parser.add_argument("--cached", action="store_true")
+    diff_parser.add_argument("commit", nargs="?")
+
     checkout_parser = commands.add_parser("checkout")
     checkout_parser.set_defaults(func=checkout)
-    checkout_parser.add_argument("oid", type=oid)
+    checkout_parser.add_argument("commit")
 
     tag_parser = commands.add_parser("tag")
     tag_parser.set_defaults(func=tag)
@@ -73,6 +96,41 @@ def parse_args():
     k_parser = commands.add_parser("k")
     k_parser.set_defaults(func=k)
 
+    branch_parser = commands.add_parser("branch")
+    branch_parser.set_defaults(func=branch)
+    branch_parser.add_argument("name", nargs="?")
+    branch_parser.add_argument("starting", default="@", type=oid, nargs="?")
+
+    status_parser = commands.add_parser("status")
+    status_parser.set_defaults(func=status)
+
+    reset_parser = commands.add_parser("reset")
+    reset_parser.set_defaults(func=reset)
+    reset_parser.add_argument("commit", type=oid)
+
+    merge_parser = commands.add_parser("merge")
+    merge_parser.set_defaults(func=merge)
+    merge_parser.add_argument("commit", type=oid)
+
+    # Return the common ancestor of two commits
+    merge_base_parser = commands.add_parser("merge-base")
+    merge_base_parser.set_defaults(func=merge_base)
+    merge_base_parser.add_argument("commit1", type=oid)
+    merge_base_parser.add_argument("commit2", type=oid)
+
+    fetch_parser = commands.add_parser("fetch")
+    fetch_parser.set_defaults(func=fetch)
+    fetch_parser.add_argument("remote")
+
+    push_parser = commands.add_parser("push")
+    push_parser.set_defaults(func=push)
+    push_parser.add_argument("remote")
+    push_parser.add_argument("branch")
+
+    add_parser = commands.add_parser("add")
+    add_parser.set_defaults(func=add)
+    add_parser.add_argument("files", nargs="+")
+
     return parser.parse_args()
 
 
@@ -80,7 +138,7 @@ def init(args):
     """
     Init function
     """
-    data.init()
+    base.init()
     print(
         f"Initialized empty xsgit repository in {
             os.getcwd()}/{data.GIT_DIR}"
@@ -126,24 +184,81 @@ def commit(args):
     print(base.commit(args.message))
 
 
+def _print_commit(oid, cmt, refs=None):
+    """
+    Return the commit string
+    """
+    refs_str = f" ({', '.join(refs)})" if refs else ""
+    print(f"commit {oid}{refs_str}\n")
+    print(textwrap.indent(cmt.message, "    "))
+    print("")
+
+
 def log(args):
     """
     Return the log of commits
     """
+    refs = {}
+    for refname, ref in data.iter_refs():
+        refs.setdefault(ref.value, []).append(refname)
 
     for oid in base.iter_commits_and_parents({args.oid}):
         cmt = base.get_commit(oid)
+        _print_commit(oid, cmt, refs.get(oid))
 
-        print(f"commit {oid}\n")
-        print(textwrap.indent(cmt.message, "    "))
-        print("")
+
+def show(args):
+    """
+    Print commits
+    """
+    if not args.oid:
+        return
+    cmt = base.get_commit(args.oid)
+    parent_tree = None
+    if cmt.parents:
+        parent_tree = base.get_commit(cmt.parents[0]).tree
+
+    _print_commit(args.oid, cmt)
+    result = diff.diff_trees(base.get_tree(
+        parent_tree), base.get_tree(cmt.tree))
+
+    sys.stdout.flush()
+    sys.stdout.buffer.write(result)
+
+
+def _diff(args):
+    """
+    Put the difference in the stdout buffer
+    """
+    oid = args.commit and base.get_oid(args.commit)
+
+    tree_from = tree_to = None
+
+    if args.commit:
+        # Provided commit hash
+        tree_from = base.get_tree(oid and base.get_commit(oid).tree)
+
+    if args.cached:
+        # If no commit, set from HEAD
+        tree_to = base.get_index_tree()
+        if not args.commit:
+            oid = base.get_oid("@")
+            tree_from = base.get_index_tree(oid and base.get_commit(oid).tree)
+    else:
+        tree_to = base.get_working_tree()
+        if not args.commit:
+            tree_from = base.get_index_tree()
+
+    result = diff.diff_trees(tree_from, tree_to)
+    sys.stdout.flush()
+    sys.stdout.buffer.write(result)
 
 
 def checkout(args):
     """
     Checkout to different branch
     """
-    base.checkout(args.oid)
+    base.checkout(args.commit)
 
 
 def tag(args):
@@ -154,23 +269,39 @@ def tag(args):
     base.create_tag(args.name, args.oid)
 
 
+def branch(args):
+    """
+    Display current branch name if exist
+    Create new branch if new (depending on the param)
+    """
+    if not args.name:
+        curr = base.get_branch_name()
+        for brnch in base.iter_branch_name():
+            prefix = "*" if brnch == curr else " "
+            print(f"{prefix} {brnch}")
+    else:
+        base.create_branch(args.name, args.starting)
+        print(f"Branch {args.name} created at {args.starting[:10]}")
+
+
 def k(args):
     """
     Display git blobs and trees in a ordered manner
     """
     dot = "digraph commits {\n"
     oids = set()
-    for refname, ref in data.iter_refs():
+    for refname, ref in data.iter_refs(deref=False):
         dot += f'"{refname}" [shape=note]\n'
-        dot += f'"{refname}" -> "{ref}"\n'
-        oids.add(ref)
+        dot += f'"{refname}" -> "{ref.value}"\n'
+        if not ref.symbolic:
+            oids.add(ref.value)
 
     for oid in base.iter_commits_and_parents(oids):
         cmt = base.get_commit(oid)
         dot += f'"{oid}" [shape=box style=filled label="{oid[:10]}"]\n'
 
-        if cmt.parent:
-            dot += f'"{oid}" -> "{cmt.parent}"\n'
+        for parent in cmt.parents:
+            dot += f'"{oid}" -> "{parent}"\n'
 
     dot += "}"
 
@@ -184,3 +315,76 @@ def k(args):
         svg_data, _ = proc.communicate(dot.encode())
     with open('output.svg', 'wb') as f:
         f.write(svg_data)
+
+
+def status(args):
+    """
+    Command that show current branch's status
+    """
+    HEAD = base.get_oid("@")
+    brnch = base.get_branch_name()
+
+    if brnch:
+        print(f"On branch {brnch}")
+    else:
+        print(f"HEAD detached at {HEAD[:10]}")
+
+    MERGE_HEAD = data.get_ref("MERGE_HEAD").value
+    if MERGE_HEAD:
+        print(f"Merging with {MERGE_HEAD[:10]}")
+
+    print("\nChanges to be commited:\n")
+    HEAD_tree = HEAD and base.get_commit(HEAD).tree
+
+    for path, action in diff.iter_changed_files(base.get_tree(HEAD_tree),
+                                                base.get_index_tree()):
+        # Formatting the action
+        print(f"{action:>12}: {path}")
+
+    print("\nChanges not staged for commit:\n")
+
+    for path, action in diff.iter_changed_files(base.get_index_tree(),
+                                                base.get_working_tree()):
+        print(f"{action:>12}: {path}")
+
+
+def reset(args):
+    """
+    Helper function for reset of HEAD pointer
+    """
+    base.reset(args.commit)
+
+
+def merge(args):
+    """
+    Helper function for merging
+    """
+    base.merge(args.commit)
+
+
+def merge_base(args):
+    """
+    Helper function to check merge base of two commits
+    """
+    print(base.get_merge_base(args.commit1, args.commit2))
+
+
+def fetch(args):
+    """
+    Helper function for fetching from remote
+    """
+    remote.fetch(args.remote)
+
+
+def push(args):
+    """
+    Helper function for pushing to remote
+    """
+    remote.push(args.remote, f"refs/heads/{args.branch}")
+
+
+def add(args):
+    """
+    Helper function that directs to add
+    """
+    base.add(args.files)
